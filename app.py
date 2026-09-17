@@ -2303,6 +2303,14 @@ def _tampilkan_error_jaringan():
         st.rerun()
 
 
+@st.cache_resource(show_spinner=False)
+def setup_database():
+    """Menjalankan persiapan database HANYA SEKALI per hidup aplikasi
+    (bukan sekali per pengunjung) — pembukaan app jadi jauh lebih cepat,
+    terutama di Streamlit Cloud."""
+    pastikan_setup()
+    return True
+
 def main():
     if "GANTI" in SPREADSHEET_ID:
         st.error("⚠️ Buka file app.py, lalu ganti teks "
@@ -2315,7 +2323,7 @@ def main():
             try:
                 with st.spinner("Menyiapkan database Google Sheets "
                                "(sekali saja)..."):
-                    pastikan_setup()
+                    setup_database()
                 st.session_state["setup_ok"] = True
             except Exception as e:
                 if _error_jaringan(e):
