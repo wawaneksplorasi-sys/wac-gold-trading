@@ -293,7 +293,7 @@ def ambil_sheet(nama_tab):
     return sh.worksheet(nama_tab)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def ambil_transaksi(dengan_foto=False):
     sh = buat_koneksi()
     akhir = "R" if dengan_foto else "Q"   # kolom R = Foto (diambil hanya jika perlu)
@@ -321,7 +321,7 @@ def ambil_transaksi(dengan_foto=False):
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def ambil_rekening():
     baris = ambil_sheet("Rekening").get_all_records()
     df = pd.DataFrame(baris)
@@ -335,7 +335,7 @@ def ambil_rekening():
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def ambil_users():
     w = ambil_sheet("Users")
     values = w.get_all_values()
@@ -361,7 +361,7 @@ def ambil_users():
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def ambil_foto_terbatas(baris_awal, baris_akhir):
     """Unduh kolom Foto HANYA untuk rentang baris yang ditampilkan
     (bukan seluruh database) — halaman Tracking jadi jauh lebih ringan."""
@@ -394,6 +394,7 @@ def cari_baris_user(username):
 # =====================================================================
 #  PERHITUNGAN OTOMATIS (inti Single Entry System)
 # =====================================================================
+@st.cache_data(ttl=600, show_spinner=False)
 def hitung_saldo(df_trx, df_rek):
     saldo = {str(r["Nama_Rekening"]).strip(): float(r["Saldo_Awal"] or 0)
              for _, r in df_rek.iterrows()}
@@ -413,6 +414,7 @@ def hitung_saldo(df_trx, df_rek):
     return saldo
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def bangun_buku(df_trx):
     """Buku kas: Debit = uang masuk, Kredit = uang keluar."""
     data = []
@@ -436,6 +438,7 @@ def bangun_buku(df_trx):
     return pd.DataFrame(data)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def mutasi_rekening(df_trx, df_rek, akun):
     saldo_awal = 0.0
     for _, r in df_rek.iterrows():
@@ -461,6 +464,7 @@ def mutasi_rekening(df_trx, df_rek, akun):
     return hasil, saldo_awal
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def data_emas(df_trx):
     e = df_trx[df_trx["Jenis"].isin(["Beli Emas", "Jual Emas"])].copy()
     if e.empty:
