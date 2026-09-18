@@ -33,6 +33,16 @@ from PIL import Image, ImageOps
 st.set_page_config(page_title="Manajemen Usaha Emas",
                    page_icon="🪙", layout="wide")
 
+# --- Hugging Face: ambil kunci dari secret & tulis jadi file (sekali per start) ---
+_sa_env = os.environ.get("SERVICE_ACCOUNT_JSON")
+if _sa_env and not os.path.exists("service_account.json"):
+    try:
+        with open("service_account.json", "w", encoding="utf-8") as f:
+            f.write(_sa_env)
+    except Exception:
+        pass
+
+
 # =====================================================================
 #  KONFIGURASI — SATU-SATUNYA BAGIAN YANG PERLU ANDA UBAH
 #  Ganti dengan ID Google Sheets Anda.
@@ -519,6 +529,41 @@ def menu_utama():
 # =====================================================================
 #  HALAMAN: DASHBOARD
 # =====================================================================
+def grafik_batang_laba(label_bulan, nilai):
+    """Grafik batang laba/rugi per bulan: hijau = laba (+),
+    merah = rugi (-). Bulan bernilai None (belum ada data) tidak
+    digambar batangnya. Fungsi ini MANDIRI (tidak bergantung pada
+    fungsi lain di dalam halaman dashboard)."""
+    import altair as alt
+
+    def _tanda_rp(v):
+        """Format Rupiah bertanda: + untuk laba, - untuk rugi."""
+        if v is None:
+            return "-"
+        if v > 0:
+            return "+" + format_rupiah(v)
+        if v < 0:
+            return "-" + format_rupiah(abs(v))
+        return format_rupiah(0)
+
+    df_c = pd.DataFrame({
+        "Bulan": list(label_bulan),
+        "Nilai": [None if v is None else float(v) for v in nilai]})
+    df_c["Warna"] = df_c["Nilai"].map(
+        lambda v: None if v is None or v == 0 else
+        ("Laba" if v > 0 else "Rugi"))
+    df_c["Tampil"] = df_c["Nilai"].map(_tanda_rp)
+    skala = alt.Scale(domain=["Laba", "Rugi"],
+                      range=["#2ca02c", "#d62728"])   # hijau, merah
+    chart = alt.Chart(df_c).mark_bar().encode(
+        x=alt.X("Bulan:N", sort=list(label_bulan), title=None),
+        y=alt.Y("Nilai:Q", title="Laba/Rugi (Rp)"),
+        color=alt.Color("Warna:N", scale=skala, legend=alt.Legend(
+            title=None, orient="top")),
+        tooltip=[alt.Tooltip("Bulan:N", title="Bulan"),
+                 alt.Tooltip("Tampil:N", title="Laba/Rugi")])
+    st.altair_chart(chart, use_container_width=True)
+
 def grafik_batang_bulan(label_bulan, nilai, judul, warna="#f0b429"):
     """Grafik batang per bulan dengan urutan bulan yang BENAR
     (sesuai kalender / bulan data pertama s.d. Desember), bukan abjad.
@@ -552,6 +597,25 @@ def halaman_dashboard():
     def gr(v):
         return "-" if v is None else format_gram(v)
 
+    # pemformat nilai bertanda: + = profit / bertambah, - = loss / berkurang
+    def tanda_rp(v):
+        if v is None:
+            return "-"
+        if v > 0:
+            return "+" + format_rupiah(v)
+        if v < 0:
+            return "-" + format_rupiah(abs(v))
+        return format_rupiah(0)
+
+    def tanda_gr(v):
+        if v is None:
+            return "-"
+        if v > 0:
+            return "+" + format_gram(v)
+        if v < 0:
+            return "-" + format_gram(abs(v))
+        return format_gram(0)
+
     if ada_trx:
         df_trx = df_trx.copy()
         df_trx["_t"] = pd.to_datetime(df_trx["Tanggal"], errors="coerce")
@@ -559,6 +623,37 @@ def halaman_dashboard():
     else:
         df_tahun = pd.DataFrame()
     ada_tahun = not df_tahun.empty
+
+    # jendela bulan tahun berjalan: bulan transaksi pertama s.d. Desember
+    bulan_awal = int(df_tahun["_t"].dt.month.min()) if ada_tahun else now.month
+    bulan_list = list(range(bulan_awal, 13))
+    label_bulan = [BULAN_ID[b - 1] for b in bulan_list]
+
+    # --- agregat bulanan (semua tahun) untuk perhitungan profit/loss ---
+    penj_bulan = {}          # total penjualan emas per bulan (Rp)
+    emas_all = pd.DataFrame()
+    if ada_trx:
+        jual_all = df_trx[df_trx["Jenis"].eq("Jual Emas")].copy()
+        if not jual_all.empty:
+            jual_all["_ym"] = (jual_all["_t"].dt.year * 12
+                               + jual_all["_t"].dt.month - 1)
+            penj_bulan = {int(k): float(v) for k, v in
+                          jual_all.groupby("_ym")["Nominal"].sum().items()}
+        emas_all = df_trx[df_trx["Jenis"].isin(["Beli Emas", "Jual Emas"])].copy()
+        if not emas_all.empty:
+            emas_all["_ym"] = (emas_all["_t"].dt.year * 12
+                               + emas_all["_t"].dt.month - 1)
+            emas_all["_arah"] = emas_all["Berat_Gram"].where(
+                emas_all["Jenis"].eq("Beli Emas"), -emas_all["Berat_Gram"])
+
+    def stok_sampai(ym):
+        """Berat emas (gram) yang menjadi stok pada akhir bulan 'ym'."""
+        if emas_all.empty or "_ym" not in emas_all.columns:
+            return 0.0
+        try:
+            return float(emas_all.loc[emas_all["_ym"] <= ym, "_arah"].sum())
+        except Exception:
+            return 0.0
 
     if not ada_trx:
         st.info("📭 Belum ada data transaksi — Dashboard menampilkan template "
@@ -601,6 +696,93 @@ def halaman_dashboard():
         st.markdown("<div style='text-align:right;font-size:1.05rem'>"
                     "<b>💰 TOTAL SALDO: -</b></div>", unsafe_allow_html=True)
 
+        # -----------------------------------------------------------------
+    # 1b) LABA/RUGI CASH (bulan berjalan & tahunan)
+    #     Laba/Rugi bulan  = penjualan emas bulan ini − pengeluaran bulan ini
+    #     Laba/Rugi tahun  = penjualan emas (1 Jan s.d. kini) −
+    #                        pengeluaran (1 Jan s.d. kini)
+    #     Pengeluaran = Beli Emas + Pengeluaran Operasional
+    #                   (transfer antar rekening tidak dihitung)
+    # -----------------------------------------------------------------
+    ym_now = now.year * 12 + (now.month - 1)
+
+    kel_bulan = {}          # pengeluaran per bulan (semua tahun)
+    if ada_trx:
+        kel_all = df_trx[df_trx["Jenis"].isin(JENIS_KELUAR)].copy()
+        if not kel_all.empty:
+            kel_all["_ym"] = (kel_all["_t"].dt.year * 12
+                              + kel_all["_t"].dt.month - 1)
+            kel_bulan = {int(k): float(v) for k, v in
+                         kel_all.groupby("_ym")["Nominal"].sum().items()}
+
+    if ada_trx:
+        # bulan berjalan
+        jual_now = penj_bulan.get(ym_now, 0.0)
+        kel_now = kel_bulan.get(ym_now, 0.0)
+        laba_bulan = jual_now - kel_now
+        # tahun berjalan (1 Jan s.d. sekarang)
+        d_tahun = df_trx[df_trx["_t"].dt.year == now.year]
+        jual_thn = float(d_tahun.loc[d_tahun["Jenis"].eq("Jual Emas"),
+                                     "Nominal"].sum())
+        kel_thn = float(d_tahun.loc[d_tahun["Jenis"].isin(JENIS_KELUAR),
+                                    "Nominal"].sum())
+        laba_tahun = jual_thn - kel_thn
+    else:
+        jual_now = kel_now = laba_bulan = None
+        jual_thn = kel_thn = laba_tahun = None
+
+    st.subheader("📊 Laba/Rugi Cash")
+    lb1, lb2 = st.columns(2)
+    with lb1:
+        st.metric(f"💵 Laba/Rugi — {BULAN_ID[now.month - 1]} {now.year}",
+                  tanda_rp(laba_bulan),
+                  help="Total penjualan emas bulan berjalan dikurangi total "
+                       "pengeluaran bulan berjalan. Pengeluaran = beli emas + "
+                       "pengeluaran operasional (transfer antar rekening "
+                       "tidak dihitung). Positif (+) = laba, negatif (−) = rugi.")
+        st.caption("-" if jual_now is None else
+                   f"Penjualan: {format_rupiah(jual_now)} · "
+                   f"Pengeluaran: {format_rupiah(kel_now)}")
+    with lb2:
+        st.metric(f"📆 Laba/Rugi — Tahun {now.year} (s.d. sekarang)",
+                  tanda_rp(laba_tahun),
+                  help="Total penjualan emas sejak 1 Januari sampai hari ini "
+                       "dikurangi total pengeluaran pada periode yang sama.")
+        st.caption("-" if jual_thn is None else
+                   f"Penjualan: {format_rupiah(jual_thn)} · "
+                   f"Pengeluaran: {format_rupiah(kel_thn)}")
+
+    # ----- tabel laba/rugi bulanan (tahun berjalan) -----
+    st.markdown(f"**📋 Tabel Laba/Rugi Bulanan — Tahun {now.year}**")
+    baris_pl = []
+    for b in bulan_list:
+        if b == now.month:
+            label = f"{BULAN_ID[b - 1]} (berjalan)"
+        elif b > now.month:
+            label = f"{BULAN_ID[b - 1]} (belum ada data)"
+        else:
+            label = BULAN_ID[b - 1]
+        if (not ada_trx) or (b > now.month):
+            baris_pl.append({"Bulan": label,
+                             "Penjualan (Rp)": "-",
+                             "Pengeluaran (Rp)": "-",
+                             "Laba/Rugi (Rp)": "-"})
+            continue
+        ym = now.year * 12 + (b - 1)
+        j_b = penj_bulan.get(ym, 0.0)
+        k_b = kel_bulan.get(ym, 0.0)
+        baris_pl.append({
+            "Bulan": label,
+            "Penjualan (Rp)": format_rupiah(j_b),
+            "Pengeluaran (Rp)": format_rupiah(k_b),
+            "Laba/Rugi (Rp)": tanda_rp(j_b - k_b)})
+    st.dataframe(pd.DataFrame(baris_pl), use_container_width=True,
+                 hide_index=True)
+    st.caption("Laba/Rugi = penjualan emas − pengeluaran (beli emas + "
+               "pengeluaran operasional; transfer antar rekening tidak "
+               "dihitung). Bulan setelah bulan berjalan ditampilkan (-) "
+               "karena belum ada data.")
+
     st.markdown("---")
 
     # -----------------------------------------------------------------
@@ -632,9 +814,15 @@ def halaman_dashboard():
     # 3) KUMPULAN GRAFIK — tahun berjalan
     #    OMZET = akumulasi PENJUALAN EMAS saja (Jual Emas)
     # -----------------------------------------------------------------
-    bulan_awal = int(df_tahun["_t"].dt.month.min()) if ada_tahun else now.month
-    bulan_list = list(range(bulan_awal, 13))
-    label_bulan = [BULAN_ID[b - 1] for b in bulan_list]
+    st.subheader(f"📈 Kumpulan Grafik — Tahun {now.year}")
+    if ada_tahun:
+        st.caption(f"Perbandingan bulanan dimulai dari {BULAN_ID[bulan_awal - 1]} "
+                   f"(bulan transaksi pertama tahun ini) sampai Desember "
+                   f"{now.year}. Omzet = akumulasi penjualan emas.")
+    else:
+        st.caption(f"Belum ada transaksi tahun {now.year} — grafik menampilkan "
+                   f"template bulan {BULAN_ID[bulan_awal - 1]} s.d. Desember "
+                   f"{now.year}. Omzet = akumulasi penjualan emas.")
 
     def sum_per_bulan(dframe):
         if dframe is None or dframe.empty:
@@ -649,16 +837,9 @@ def halaman_dashboard():
         omzet_map, keluar_map = {}, {}
     ser_omzet = [omzet_map.get(b, 0.0) for b in bulan_list]
     ser_keluar = [keluar_map.get(b, 0.0) for b in bulan_list]
-
-    st.subheader(f"📈 Kumpulan Grafik — Tahun {now.year}")
-    if ada_tahun:
-        st.caption(f"Perbandingan bulanan dimulai dari {BULAN_ID[bulan_awal - 1]} "
-                   f"(bulan transaksi pertama tahun ini) sampai Desember "
-                   f"{now.year}. Omzet = akumulasi penjualan emas.")
-    else:
-        st.caption(f"Belum ada transaksi tahun {now.year} — grafik menampilkan "
-                   f"template bulan {BULAN_ID[bulan_awal - 1]} s.d. Desember "
-                   f"{now.year}. Omzet = akumulasi penjualan emas.")
+    ser_laba = ([omzet_map.get(b, 0.0) - keluar_map.get(b, 0.0)
+                 if ada_tahun and b <= now.month else None
+                 for b in bulan_list])
 
     def v_bulan_ini(ser):
         if not ada_trx:
@@ -678,9 +859,11 @@ def halaman_dashboard():
         selisih = v_ini - v_lalu
         return ("+" if selisih >= 0 else "-") + format_rupiah(abs(selisih))
 
-    tab1, tab2, tab3 = st.tabs(["📈 Omzet Penjualan Emas",
-                                "💸 Pengeluaran",
-                                "🥧 Porsi Pengeluaran (Bulan Ini)"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📈 Omzet Penjualan Emas",
+         "💸 Pengeluaran",
+         "🥧 Porsi Pengeluaran (Bulan Ini)",
+         "⚖️ Laba/Rugi Bulanan"])
 
     with tab1:
         v_ini, v_lalu = v_bulan_ini(ser_omzet), v_bulan_lalu(ser_omzet)
@@ -772,6 +955,25 @@ def halaman_dashboard():
                 use_container_width=True, hide_index=True)
             st.markdown(f"**💸 Total Pengeluaran Bulan Ini: "
                         f"{format_rupiah(total)}**")
+    with tab4:
+        t1, t2 = st.columns(2)
+        t1.metric("Laba/Rugi Bulan Ini",
+                  tanda_rp(None if not ada_trx else
+                           (omzet_map.get(now.month, 0.0)
+                            - keluar_map.get(now.month, 0.0))),
+                  help="Penjualan emas − pengeluaran pada bulan berjalan. "
+                       "Hijau = laba, merah = rugi.")
+        t2.metric("Laba/Rugi Tahun Berjalan",
+                  tanda_rp(None if not ada_tahun else
+                           (sum(ser_omzet) - sum(ser_keluar))),
+                  help="Akumulasi laba/rugi sejak bulan pertama tahun ini "
+                       "sampai bulan berjalan.")
+        grafik_batang_laba(label_bulan, ser_laba)
+        with st.expander("🔢 Lihat angka per bulan"):
+            nilai = ["-" if v is None else tanda_rp(v) for v in ser_laba]
+            st.dataframe(pd.DataFrame({"Bulan": label_bulan,
+                                       "Laba/Rugi (Rp)": nilai}),
+                         use_container_width=True, hide_index=True)                        
 
     st.markdown("---")
 
@@ -1613,6 +1815,67 @@ def halaman_input():
 
     st.caption("👤 Kelola pengguna (profil, ganti password, tambah user) "
                "sekarang ada di menu **⚙️ Pengaturan**.")
+
+        # ---------- HAPUS SEMUA DATA (RESET DATABASE) ----------
+    with st.expander("🧹 Hapus Semua Data — Reset Database (HATI-HATI)"):
+        st.caption("Mengosongkan SELURUH transaksi (termasuk foto bukti) dari "
+                   "database. Dipakai untuk membersihkan data dummy/latihan "
+                   "sebelum memasukkan data asli. Akun login TIDAK dihapus.")
+        st.warning("⚠️ Tindakan ini TIDAK dapat dibatalkan. Pastikan Anda "
+                   "sudah mengekspor/mencadangkan data penting (menu "
+                   "Keuangan/Stok Emas punya tombol Unduh CSV).")
+
+        try:
+            df_cek = ambil_transaksi()
+            n_data = 0 if df_cek.empty else len(df_cek)
+        except Exception:
+            n_data = None
+
+        if n_data == 0:
+            st.success("✅ Database transaksi sudah kosong — tidak ada yang "
+                       "perlu dihapus. Anda bisa langsung menginput data asli.")
+        else:
+            st.markdown(f"**Data yang akan dihapus:** {n_data} transaksi "
+                        "(seluruh baris pada tab 'Transaksi' di Google "
+                        "Sheets, termasuk semua foto bukti).")
+            opsi_reset = st.radio(
+                "Rekening & saldo awal ikut dibersihkan?",
+                ["Tidak — pertahankan daftar rekening (disarankan)",
+                 "Ya — kosongkan juga daftar rekening"],
+                help="Jika dipilih 'Ya': seluruh baris tab 'Rekening' "
+                     "dihapus. Anda mendaftarkan ulang rekening setelah "
+                     "reset (bisa lewat Kelola Rekening di atas).")
+            ketik = st.text_input(
+                "Ketik persis kalimat berikut untuk mengonfirmasi: "
+                "**HAPUS SEMUA DATA**",
+                placeholder="HAPUS SEMUA DATA")
+            if st.button("🧹 HAPUS SEKARANG — SEMUA TRANSAKSI",
+                         disabled=(ketik.strip() != "HAPUS SEMUA DATA"),
+                         type="primary"):
+                with st.spinner("Menghapus seluruh data transaksi..."):
+                    try:
+                        sh = buat_koneksi()
+                        # 1) kosongkan seluruh baris transaksi (kolom A s.d. R)
+                        sh.values_clear("Transaksi!A2:R100000")
+                        # 2) opsional: kosongkan daftar rekening
+                        if opsi_reset.startswith("Ya"):
+                            sh.values_clear("Rekening!A2:F1000")
+                        st.cache_data.clear()
+                        st.session_state.pop("hapus_trx_list", None)
+                        st.session_state.pop("dummy_df", None)
+                        st.session_state.pop("dummy_konfig", None)
+                        st.session_state.pop("dummy_ada_trx", None)
+                        pesan = "✅ Semua data transaksi berhasil dihapus."
+                        if opsi_reset.startswith("Ya"):
+                            pesan += (" Daftar rekening juga dikosongkan — "
+                                      "daftarkan ulang rekening Anda di "
+                                      "'Kelola Rekening' sebelum input data "
+                                      "baru.")
+                        pesan += (" Database siap diisi data asli. Semua "
+                                  "menu kembali menampilkan template kosong.")
+                        st.success(pesan)
+                    except Exception as e:
+                        st.error(f"Gagal menghapus data: {e}")
 
 
 def form_input_manual(daftar_rek):
