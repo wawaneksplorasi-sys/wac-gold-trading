@@ -34,6 +34,7 @@ st.set_page_config(page_title="Manajemen Usaha Emas",
                    page_icon="🪙", layout="wide")
 
 
+
 # =====================================================================
 #  KONFIGURASI — SATU-SATUNYA BAGIAN YANG PERLU ANDA UBAH
 #  Ganti dengan ID Google Sheets Anda.
