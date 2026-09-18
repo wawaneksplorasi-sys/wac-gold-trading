@@ -33,15 +33,6 @@ from PIL import Image, ImageOps
 st.set_page_config(page_title="Manajemen Usaha Emas",
                    page_icon="🪙", layout="wide")
 
-# --- Hugging Face: ambil kunci dari secret & tulis jadi file (sekali per start) ---
-_sa_env = os.environ.get("SERVICE_ACCOUNT_JSON")
-if _sa_env and not os.path.exists("service_account.json"):
-    try:
-        with open("service_account.json", "w", encoding="utf-8") as f:
-            f.write(_sa_env)
-    except Exception:
-        pass
-
 
 # =====================================================================
 #  KONFIGURASI — SATU-SATUNYA BAGIAN YANG PERLU ANDA UBAH
