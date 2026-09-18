@@ -19,6 +19,7 @@ import os
 import io
 import re
 import uuid
+import time
 import base64
 import hashlib
 import datetime as dt
@@ -154,7 +155,12 @@ def deteksi_gps():
 # =====================================================================
 @st.cache_resource(show_spinner=False)
 def buat_koneksi():
-    # 1) Kumpulkan semua file yang mengandung "json" pada namanya
+    """Koneksi Google Sheets dengan TIMEOUT 30 detik + percobaan ulang
+    otomatis — mencegah aplikasi terjebak 'loading selamanya' ketika
+    koneksi ke Google lambat/terputus."""
+    creds = None
+
+    # 1) cari file kunci json di folder (mode laptop)
     kandidat = []
     try:
         for nama_file in os.listdir("."):
@@ -162,39 +168,63 @@ def buat_koneksi():
                 kandidat.append(nama_file)
     except Exception:
         pass
-
-    # 2) Pakai file yang benar-benar berisi kunci Google
-    #    (ditandai adanya 'client_email' dan 'private_key' di isinya)
     for nama in kandidat:
         try:
             with open(nama, "r", encoding="utf-8") as f:
                 isi = f.read()
             if "client_email" in isi and "private_key" in isi:
-                creds = Credentials.from_service_account_file(nama, scopes=SCOPES)
-                return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
+                creds = Credentials.from_service_account_file(nama,
+                                                              scopes=SCOPES)
+                break
         except Exception:
             continue
 
-    # 3) Bila tidak ada, coba Streamlit secrets (dipakai nanti saat hosting)
-    try:
-        info = dict(st.secrets["service_account"])
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
-    except Exception:
-        pass
+    # 2) bila tidak ada file, pakai Streamlit Secrets (mode online)
+    if creds is None:
+        try:
+            info = dict(st.secrets["service_account"])
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+        except Exception:
+            pass
 
-    # 4) Pesan error yang lebih jelas (menunjukkan isi folder Anda)
-    folder = os.getcwd()
-    if kandidat:
+    if creds is None:
+        folder = os.getcwd()
+        if kandidat:
+            raise RuntimeError(
+                f"Ada file JSON di {folder}: {', '.join(kandidat)} — tetapi "
+                "BUKAN file kunci Google yang valid (tidak berisi "
+                "'client_email').")
         raise RuntimeError(
-            f"Ada file JSON di {folder}: {', '.join(kandidat)} — tetapi BUKAN "
-            "file kunci Google yang valid (tidak berisi 'client_email'). "
-            "Unduh ulang: Google Cloud Console → IAM & Admin → Service Accounts "
-            "→ klik akun → tab KEYS → ADD KEY → Create new key → JSON.")
-    raise RuntimeError(
-        f"File kunci Google (JSON) TIDAK ADA di folder: {folder}. Salin file "
-        "JSON hasil unduhan dari Google Cloud ke folder tersebut (nama file "
-        "apa pun boleh, asal berekstensi .json), lalu jalankan ulang aplikasi.")
+            "Kunci Google tidak ditemukan. Mode laptop: taruh file "
+            "service_account.json di folder aplikasi. Mode online (Streamlit "
+            "Cloud): isi menu Secrets.")
+
+    # 3) buka spreadsheet — dengan batas waktu & percobaan ulang
+    total_coba = 3
+    for percobaan in range(1, total_coba + 1):
+        try:
+            gc = gspread.authorize(creds)
+            # pasang batas waktu 30 detik utk SEMUA permintaan ke Google
+            try:
+                sesi = gc.http_client.session
+                _asli_request = sesi.request
+
+                def _request_berbatas_waktu(*args, **kwargs):
+                    kwargs.setdefault("timeout", 30)
+                    return _asli_request(*args, **kwargs)
+
+                sesi.request = _request_berbatas_waktu
+            except Exception:
+                pass  # bila struktur gspread berbeda, lanjut tanpa timeout
+            return gc.open_by_key(SPREADSHEET_ID)
+        except Exception as e:
+            if percobaan >= total_coba:
+                raise RuntimeError(
+                    f"Gagal menghubungi Google Sheets setelah {total_coba}x "
+                    f"percobaan: {str(e)[:250]}. Jika pesan ini muncul "
+                    "berulang, tunggu beberapa menit lalu muat ulang "
+                    "halaman.")
+            time.sleep(2)   # jeda singkat, lalu coba lagi
 
 
 def pastikan_setup():
@@ -248,6 +278,12 @@ def pastikan_setup():
         wr.append_row(["Kas Toko", "Kas Tunai", "", "", 0,
                        "Contoh rekening — silakan ganti"])
 
+@st.cache_resource(show_spinner=False)
+def setup_database():
+    """Persiapan database HANYA SEKALI per hidup aplikasi (bukan per
+    pengunjung) — halaman login jadi jauh lebih ringan dan cepat."""
+    pastikan_setup()
+    return True
 
 @st.cache_resource(show_spinner=False)
 def ambil_sheet(nama_tab):
@@ -257,7 +293,7 @@ def ambil_sheet(nama_tab):
     return sh.worksheet(nama_tab)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def ambil_transaksi(dengan_foto=False):
     sh = buat_koneksi()
     akhir = "R" if dengan_foto else "Q"   # kolom R = Foto (diambil hanya jika perlu)
@@ -285,7 +321,7 @@ def ambil_transaksi(dengan_foto=False):
     return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def ambil_rekening():
     baris = ambil_sheet("Rekening").get_all_records()
     df = pd.DataFrame(baris)
@@ -299,7 +335,7 @@ def ambil_rekening():
     return df
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def ambil_users():
     w = ambil_sheet("Users")
     values = w.get_all_values()
@@ -325,7 +361,7 @@ def ambil_users():
     return df
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def ambil_foto_terbatas(baris_awal, baris_akhir):
     """Unduh kolom Foto HANYA untuk rentang baris yang ditampilkan
     (bukan seluruh database) — halaman Tracking jadi jauh lebih ringan."""
@@ -2538,33 +2574,24 @@ def _error_jaringan(e):
     """Mendeteksi apakah error disebabkan masalah koneksi internet."""
     pesan = f"{type(e).__name__}: {e}"
     tanda = ("getaddrinfo", "connectionerror", "max retries exceeded",
-             "timed out", "connection reset", "connection aborted",
+             "timed out", "timeout", "connection reset", "connection aborted",
+             "remotedisconnected", "closed connection without response",
              "newconnectionerror", "proxyerror", "sslerror",
-             "failed to resolve", "temporarily unavailable")
+             "failed to resolve", "temporarily unavailable",
+             "internalservererror", "badgateway", "service unavailable",
+             "readtimeout", "connecttimeout")
     return any(t in pesan.lower() for t in tanda)
 
 
 def _tampilkan_error_jaringan():
-    st.error("🌐 **Koneksi ke Google Sheets terputus.**\n\n"
-             "Laptop Anda saat itu tidak dapat menghubungi server Google "
-             "(internet putus sesaat, berpindah jaringan, VPN aktif, atau "
-             "gangguan DNS). Tenang — **data Anda aman** di Google Sheets.\n\n"
-             "**Langkah:**\n"
-             "1. Pastikan internet aktif (buka google.com di browser)\n"
-             "2. Matikan VPN/proxy bila sedang aktif\n"
-             "3. Tunggu ±30 detik, lalu tekan tombol di bawah")
+    st.error("🌐 **Koneksi ke Google Sheets bermasalah / lambat.**\n\n"
+             "Data Anda aman. Tunggu ±10–30 detik lalu tekan tombol di "
+             "bawah. Bila berulang, tunggu beberapa menit (server sedang "
+             "sibuk) lalu coba lagi.")
     if st.button("🔄 Coba Lagi Sekarang", type="primary"):
         st.cache_data.clear()
         st.rerun()
 
-
-@st.cache_resource(show_spinner=False)
-def setup_database():
-    """Menjalankan persiapan database HANYA SEKALI per hidup aplikasi
-    (bukan sekali per pengunjung) — pembukaan app jadi jauh lebih cepat,
-    terutama di Streamlit Cloud."""
-    pastikan_setup()
-    return True
 
 def main():
     if "GANTI" in SPREADSHEET_ID:
@@ -2576,21 +2603,29 @@ def main():
     if not st.session_state.get("logged_in", False):
         if not st.session_state.get("setup_ok", False):
             try:
-                with st.spinner("Menyiapkan database Google Sheets "
-                               "(sekali saja)..."):
-                    setup_database()
+                with st.spinner("Menyiapkan database (sekali saja)..."):
+                    try:
+                        setup_database()       # versi hemat (EDIT 3)
+                    except NameError:
+                        pastikan_setup()       # cadangan bila EDIT 3 belum ada
                 st.session_state["setup_ok"] = True
             except Exception as e:
                 if _error_jaringan(e):
                     _tampilkan_error_jaringan()
                     st.stop()
                 st.error(f"⚠️ Gagal menyiapkan database: {e}")
-                st.info("Periksa 3 hal: (1) SPREADSHEET_ID di app.py sudah "
-                        "benar; (2) file service_account.json ada di folder "
-                        "yang sama dengan app.py; (3) spreadsheet sudah "
+                st.info("Periksa: (1) SPREADSHEET_ID di app.py sudah benar; "
+                        "(2) kunci Google tersedia (file json di laptop / "
+                        "Secrets di Streamlit Cloud); (3) spreadsheet sudah "
                         "di-SHARE ke email service account sebagai Editor.")
                 st.stop()
-        halaman_login()
+        try:
+            halaman_login()
+        except Exception as e:
+            if _error_jaringan(e):
+                _tampilkan_error_jaringan()
+            else:
+                raise e
     else:
         try:
             menu_utama()
